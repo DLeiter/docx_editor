@@ -54,22 +54,24 @@ class DocxEditor:
     def __init__(self, root):
         self.root = root
         self.root.title("DOCX Editor")
-        self.root.geometry("1000x700")
+        self.root.geometry("1000x800")
         
-        # Document variables
-        self.current_file = None
+        # Initialize variables
         self.document = None
+        self.current_file = ""
+        self.tables = []
         self.document_images = []
         
         # Text formatting state variables
         self.current_font_family = "Arial"
-        self.current_font_size = 11
+        self.current_font_size = 12
         self.current_bold = False
         self.current_italic = False
         self.current_underline = False
-        self.current_alignment = "left"
         self.current_color = "#000000"
-        self.current_highlight_color = "#FFFF00"  # Yellow
+        self.current_highlight = "#FFFFFF"
+        self.current_alignment = "left"
+        self.current_style = "Normal"#FFFF00"  # Yellow
         
         # Table management
         self.tables = []
@@ -94,7 +96,13 @@ class DocxEditor:
         
         # Set up keyboard shortcuts
         self._setup_keyboard_shortcuts()
-    
+        
+        # Set initial status
+        self.status_var.set("Ready")
+        
+        # Auto-load the first example document if available
+        self.auto_load_example_document()
+        
     def create_menu(self):
         menubar = tk.Menu(self.root)
         
@@ -384,44 +392,9 @@ class DocxEditor:
         )
         
         if file_path:
-            try:
-                self.document = Document(file_path)
-                self.current_file = file_path
-                self.document_images = []
-                
-                # Extract text and content from document
-                text_content = ""
-                for para in self.document.paragraphs:
-                    # Check for headings and add appropriate markdown
-                    if para.style and para.style.name.startswith('Heading 1'):
-                        text_content += f"# {para.text}\n"
-                    elif para.style and para.style.name.startswith('Heading 2'):
-                        text_content += f"## {para.text}\n"
-                    elif para.style and para.style.name.startswith('Heading 3'):
-                        text_content += f"### {para.text}\n"
-                    else:
-                        text_content += para.text + "\n"
-                
-                # Handle tables (just add placeholders in the text for now)
-                if self.document.tables:
-                    self.tables = self.document.tables
-                    for i, table in enumerate(self.document.tables):
-                        text_content += f"\n[TABLE {i+1}]\n"
-                
-                # Update UI
-                self.text_editor.delete(1.0, tk.END)
-                self.text_editor.insert(tk.END, text_content)
-                
-                # Update document structure tab
-                self.update_document_structure()
-                
-                # Update the headings navigation dropdown
-                self.update_headings_navigation()
-                
+            if self.load_document(file_path):
                 self.status_var.set(f"Opened: {os.path.basename(file_path)}")
                 messagebox.showinfo("Success", f"Opened {os.path.basename(file_path)}")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to open file: {str(e)}")
     
     def save_file(self):
         if not self.current_file:
