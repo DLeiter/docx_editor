@@ -62,6 +62,9 @@ class DocxEditor:
         self.tables = []
         self.document_images = []
         
+        # Keep references to tkinter image objects to prevent garbage collection errors
+        self._image_references = []
+        
         # Text formatting state variables
         self.current_font_family = "Arial"
         self.current_font_size = 12
@@ -234,20 +237,17 @@ class DocxEditor:
         ttk.Separator(self.format_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=5, fill=tk.Y)
         
         # Bold button
-        self.bold_icon = tk.PhotoImage(data=self._get_bold_icon())
-        self.bold_button = ttk.Button(self.format_frame, image=self.bold_icon, width=3, command=self.toggle_bold)
+        self.bold_button = ttk.Button(self.format_frame, text="B", width=2, command=self.toggle_bold)
         self._create_tooltip(self.bold_button, "Bold (Ctrl+B)")
         self.bold_button.pack(side=tk.LEFT, padx=2)
         
         # Italic button
-        self.italic_icon = tk.PhotoImage(data=self._get_italic_icon())
-        self.italic_button = ttk.Button(self.format_frame, image=self.italic_icon, width=3, command=self.toggle_italic)
+        self.italic_button = ttk.Button(self.format_frame, text="I", width=2, command=self.toggle_italic)
         self._create_tooltip(self.italic_button, "Italic (Ctrl+I)")
         self.italic_button.pack(side=tk.LEFT, padx=2)
         
         # Underline button
-        self.underline_icon = tk.PhotoImage(data=self._get_underline_icon())
-        self.underline_button = ttk.Button(self.format_frame, image=self.underline_icon, width=3, command=self.toggle_underline)
+        self.underline_button = ttk.Button(self.format_frame, text="U", width=2, command=self.toggle_underline)
         self._create_tooltip(self.underline_button, "Underline (Ctrl+U)")
         self.underline_button.pack(side=tk.LEFT, padx=2)
         
@@ -265,19 +265,22 @@ class DocxEditor:
         ttk.Separator(self.format_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=5, fill=tk.Y)
         
         # Alignment buttons
-        self.align_left_icon = tk.PhotoImage(data=self._get_align_left_icon())
-        self.align_left_button = ttk.Button(self.format_frame, image=self.align_left_icon, width=3, command=lambda: self.set_alignment("left"))
-        self._create_tooltip(self.align_left_button, "Align Left (Ctrl+L)")
+        alignment_frame = ttk.Frame(self.format_frame)
+        alignment_frame.pack(side=tk.LEFT, padx=2)
+        
+        self.align_left_button = ttk.Button(alignment_frame, text="L", width=2, 
+                                          command=lambda: self.set_alignment("left"))
+        self._create_tooltip(self.align_left_button, "Align Left")
         self.align_left_button.pack(side=tk.LEFT, padx=2)
         
-        self.align_center_icon = tk.PhotoImage(data=self._get_align_center_icon())
-        self.align_center_button = ttk.Button(self.format_frame, image=self.align_center_icon, width=3, command=lambda: self.set_alignment("center"))
-        self._create_tooltip(self.align_center_button, "Align Center (Ctrl+E)")
+        self.align_center_button = ttk.Button(alignment_frame, text="C", width=2, 
+                                            command=lambda: self.set_alignment("center"))
+        self._create_tooltip(self.align_center_button, "Align Center")
         self.align_center_button.pack(side=tk.LEFT, padx=2)
         
-        self.align_right_icon = tk.PhotoImage(data=self._get_align_right_icon())
-        self.align_right_button = ttk.Button(self.format_frame, image=self.align_right_icon, width=3, command=lambda: self.set_alignment("right"))
-        self._create_tooltip(self.align_right_button, "Align Right (Ctrl+R)")
+        self.align_right_button = ttk.Button(alignment_frame, text="R", width=2, 
+                                           command=lambda: self.set_alignment("right"))
+        self._create_tooltip(self.align_right_button, "Align Right")
         self.align_right_button.pack(side=tk.LEFT, padx=2)
         
         # Separator
@@ -903,58 +906,46 @@ class DocxEditor:
     # Image handling methods
     def insert_image(self):
         file_path = filedialog.askopenfilename(
-            filetypes=[("Image files", "*.jpg *.jpeg *.png *.gif *.bmp"), ("All files", "*.*")]
+            filetypes=[("Image files", "*.jpg *.jpeg *.png *.gif *.bmp"), ("All Files", "*.*")]
         )
         
         if file_path:
             try:
-                # Create a document if it doesn't exist
-                if not self.document:
-                    self.document = Document()
+                # Open the image with PIL
+                pil_img = Image.open(file_path)
                 
-                # Add the image to the document
-                paragraph = self.document.add_paragraph()
-                run = paragraph.add_run()
-                run.add_picture(file_path, width=Inches(4))  # Default width
+                # Resize if needed (optional)
+                max_width = 500
+                if pil_img.width > max_width:
+                    ratio = max_width / pil_img.width
+                    new_height = int(pil_img.height * ratio)
+                    pil_img = pil_img.resize((max_width, new_height), Image.LANCZOS)
                 
-                # Track the image
-                if not hasattr(self, 'document_images'):
-                    self.document_images = []
-                self.document_images.append(file_path)
+                # Convert to PhotoImage for tkinter
+                img = ImageTk.PhotoImage(pil_img)
                 
-                # Add a placeholder in the text
-                img_index = len(self.document_images)
+                # Store reference to prevent garbage collection
+                self._image_references.append(img)
+                
+                # Insert a placeholder in the text
                 cursor_pos = self.text_editor.index(tk.INSERT)
-                self.text_editor.insert(cursor_pos, f"[IMAGE {img_index}]\n")
+                self.text_editor.insert(cursor_pos, "[IMAGE]\n")
+                
+                # For document structure, we'll store the image path
+                self.document_images.append({
+                    "path": file_path,
+                    "position": cursor_pos,
+                    "image": img  # Keep reference to the image
+                })
+                
+                # Update document structure
+                self.update_document_structure()
                 
                 self.status_var.set(f"Inserted image: {os.path.basename(file_path)}")
-                self.update_document_structure()
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to insert image: {str(e)}")
     
-    def _get_bold_icon(self):
-        # Base64 encoded minimal bold icon
-        return b'R0lGODlhEAAQAIABAAAAAP///yH5BAEAAAEALAAAAAAQABAAAAIjjI+py+0Po5wHVIBzVphqa3zbmlFNyYksB4bj+TJoPS0FADs='
-
-    def _get_italic_icon(self):
-        # Base64 encoded minimal italic icon
-        return b'R0lGODlhEAAQAIABAAAAAP///yH5BAEAAAEALAAAAAAQABAAAAIejI+py+0Po5wGNIBzZZhN24lQBoZkB35jKnIkWwAAOw=='
-
-    def _get_underline_icon(self):
-        # Base64 encoded minimal underline icon
-        return b'R0lGODlhEAAQAIABAAAAAP///yH5BAEAAAEALAAAAAAQABAAAAIijI+py+0Po5wSgAtzfoCbBXJbGI5MGZ4kdY2qh75zWgAAOw=='
-
-    def _get_align_left_icon(self):
-        # Base64 encoded minimal align left icon
-        return b'R0lGODlhEAAQAIABAAAAAP///yH5BAEAAAEALAAAAAAQABAAAAIdjI+py+0Po5y02ouz3rz7D4biSJbmiaIqeK5LAQA7'
-
-    def _get_align_center_icon(self):
-        # Base64 encoded minimal align center icon
-        return b'R0lGODlhEAAQAIABAAAAAP///yH5BAEAAAEALAAAAAAQABAAAAIdjI+py+0Po5y02ouz3jzgD4ZiSJZmiX4qyrbuUwAAOw=='
-
-    def _get_align_right_icon(self):
-        # Base64 encoded minimal align right icon
-        return b'R0lGODlhEAAQAIABAAAAAP///yH5BAEAAAEALAAAAAAQABAAAAIdjI+py+0Po5y02ouz3rz7D4YiSJbmiZ6purZxVAAAOw=='
+    # We're no longer using icon getters - using text buttons instead
     
     # Tooltip class for creating tooltips on hover
     def _create_tooltip(self, widget, text):
