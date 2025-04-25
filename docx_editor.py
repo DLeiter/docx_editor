@@ -5,6 +5,10 @@ DOCX Editor - A program to edit Word documents with advanced features
 import os
 import sys
 import io
+import zipfile
+import tempfile
+import shutil
+import xml.dom.minidom
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext, colorchooser, font
 from tkinter.constants import *
@@ -90,6 +94,11 @@ class DocxEditor:
         
         # Tooltip dictionary to keep track of tooltips
         self.tooltips = {}
+        
+        # Dev mode flag
+        self.dev_mode = False
+        self.xml_editor_windows = {}
+        self.temp_dir = None
         
         # Create all widgets and interface elements
         self.create_menu()
@@ -198,9 +207,19 @@ class DocxEditor:
         
         # Help menu
         helpmenu = tk.Menu(menubar, tearoff=0)
-        helpmenu.add_command(label="About", command=self.show_about)
         helpmenu.add_command(label="Help", command=self.show_help)
+        helpmenu.add_command(label="About", command=lambda: messagebox.showinfo("About", "DOCX Editor\nVersion 1.0\n\nA feature-rich document editor for DOCX files."))
         menubar.add_cascade(label="Help", menu=helpmenu)
+        
+        # Developer menu
+        devmenu = tk.Menu(menubar, tearoff=0)
+        devmenu.add_checkbutton(label="Developer Mode", command=self.toggle_dev_mode, variable=tk.BooleanVar(value=self.dev_mode))
+        devmenu.add_command(label="Edit XML Structure", command=self.edit_xml_structure)
+        devmenu.add_separator()
+        devmenu.add_command(label="View Document Properties XML", command=lambda: self.edit_specific_xml("docProps/core.xml"))
+        devmenu.add_command(label="View Main Document XML", command=lambda: self.edit_specific_xml("word/document.xml"))
+        devmenu.add_command(label="View Styles XML", command=lambda: self.edit_specific_xml("word/styles.xml"))
+        menubar.add_cascade(label="Developer", menu=devmenu)
         
         self.root.config(menu=menubar)
     
@@ -2052,6 +2071,174 @@ class DocxEditor:
         self.text_editor.insert(cursor_pos, "\n1. Item 1\n2. Item 2\n3. Item 3\n")
         self.status_var.set("Numbered list inserted")
 
+    # Developer mode methods
+    def toggle_dev_mode(self):
+        """Toggle developer mode on/off"""
+        self.dev_mode = not self.dev_mode
+        status = "enabled" if self.dev_mode else "disabled"
+        self.status_var.set(f"Developer mode {status}")
+    
+    def edit_xml_structure(self):
+        """Show the XML structure of the current document for editing"""
+        if not self.document or not self.current_file:
+            messagebox.showinfo("No Document", "Please open a document first.")
+            return
+            
+        # Create temporary directory for extracted files
+        if self.temp_dir:
+            try:
+                shutil.rmtree(self.temp_dir)
+            except:
+                pass
+        self.temp_dir = tempfile.mkdtemp()
+        
+        # Extract the docx file (which is a zip)
+        try:
+            with zipfile.ZipFile(self.current_file, 'r') as zip_ref:
+                zip_ref.extractall(self.temp_dir)
+            
+            # Show a list of XML files for editing
+            xml_dialog = tk.Toplevel(self.root)
+            xml_dialog.title("DOCX XML Structure")
+            xml_dialog.geometry("600x400")
+            
+            # Frame for file list
+            list_frame = ttk.Frame(xml_dialog)
+            list_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=10)
+            
+            ttk.Label(list_frame, text="XML Files in DOCX:").pack(anchor=tk.W)
+            
+            # Create scrollable list
+            xml_files_frame = ttk.Frame(list_frame)
+            xml_files_frame.pack(fill=tk.BOTH, expand=True)
+            
+            scrollbar = ttk.Scrollbar(xml_files_frame)
+            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            
+            xml_listbox = tk.Listbox(xml_files_frame, yscrollcommand=scrollbar.set)
+            xml_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            scrollbar.config(command=xml_listbox.yview)
+            
+            # Find all XML files
+            xml_file_paths = []
+            for root, dirs, files in os.walk(self.temp_dir):
+                for file in files:
+                    if file.endswith('.xml') or file.endswith('.rels'):
+                        rel_path = os.path.relpath(os.path.join(root, file), self.temp_dir)
+                        xml_file_paths.append(rel_path)
+                        xml_listbox.insert(tk.END, rel_path)
+            
+            # Button to open selected XML file
+            def open_selected_xml():
+                selection = xml_listbox.curselection()
+                if selection:
+                    selected_file = xml_file_paths[selection[0]]
+                    self.edit_specific_xml(selected_file)
+            
+            ttk.Button(list_frame, text="Edit Selected XML", command=open_selected_xml).pack(pady=5)
+            ttk.Button(list_frame, text="Save Changes & Rebuild DOCX", command=self.rebuild_docx).pack(pady=5)
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to extract DOCX file: {str(e)}")
+    
+    def edit_specific_xml(self, xml_path):
+        """Open a specific XML file from the DOCX for editing"""
+        if not self.document or not self.current_file or not self.temp_dir:
+            if not self.current_file:
+                messagebox.showinfo("No Document", "Please open a document first.")
+                return
+            # Extract if not already extracted
+            self.edit_xml_structure()
+            if not self.temp_dir:
+                return
+        
+        full_path = os.path.join(self.temp_dir, xml_path)
+        
+        # Check if file exists
+        if not os.path.exists(full_path):
+            messagebox.showinfo("File Not Found", f"The file {xml_path} was not found in this document.")
+            return
+        
+        # If this XML is already open in an editor, bring it to front
+        if xml_path in self.xml_editor_windows and self.xml_editor_windows[xml_path].winfo_exists():
+            self.xml_editor_windows[xml_path].lift()
+            return
+        
+        # Read the XML file
+        try:
+            with open(full_path, 'r', encoding='utf-8') as f:
+                xml_content = f.read()
+            
+            # Try to pretty print it
+            try:
+                dom = xml.dom.minidom.parseString(xml_content)
+                pretty_xml = dom.toprettyxml(indent="  ")
+            except:
+                pretty_xml = xml_content  # Fallback to raw content if can't format
+            
+            # Create editor window
+            editor_window = tk.Toplevel(self.root)
+            editor_window.title(f"Editing {xml_path}")
+            editor_window.geometry("800x600")
+            
+            # Add editor
+            xml_editor = scrolledtext.ScrolledText(editor_window, wrap=tk.NONE, font=("Courier New", 10))
+            xml_editor.pack(expand=True, fill=tk.BOTH, padx=5, pady=5)
+            xml_editor.insert(tk.END, pretty_xml)
+            
+            # Add horizontal scrollbar
+            h_scrollbar = ttk.Scrollbar(editor_window, orient=tk.HORIZONTAL, command=xml_editor.xview)
+            h_scrollbar.pack(fill=tk.X)
+            xml_editor.config(xscrollcommand=h_scrollbar.set)
+            
+            # Save button
+            def save_xml():
+                try:
+                    with open(full_path, 'w', encoding='utf-8') as f:
+                        f.write(xml_editor.get(1.0, tk.END))
+                    messagebox.showinfo("Success", f"Saved changes to {xml_path}")
+                except Exception as e:
+                    messagebox.showerror("Error", f"Failed to save file: {str(e)}")
+            
+            button_frame = ttk.Frame(editor_window)
+            button_frame.pack(fill=tk.X, padx=5, pady=5)
+            ttk.Button(button_frame, text="Save", command=save_xml).pack(side=tk.LEFT, padx=5)
+            ttk.Button(button_frame, text="Close", command=editor_window.destroy).pack(side=tk.LEFT, padx=5)
+            
+            # Keep reference to prevent garbage collection
+            self.xml_editor_windows[xml_path] = editor_window
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to open XML file: {str(e)}")
+    
+    def rebuild_docx(self):
+        """Rebuild the DOCX file from edited XML files"""
+        if not self.temp_dir or not self.current_file:
+            messagebox.showinfo("No Extracted Document", "No document has been extracted for editing.")
+            return
+        
+        try:
+            # Backup the original file
+            backup_file = f"{self.current_file}.backup"
+            shutil.copy2(self.current_file, backup_file)
+            
+            # Create a new ZIP file
+            with zipfile.ZipFile(self.current_file, 'w') as zip_ref:
+                # Add all files from the temp directory
+                for root, dirs, files in os.walk(self.temp_dir):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        arc_name = os.path.relpath(file_path, self.temp_dir)
+                        zip_ref.write(file_path, arc_name)
+            
+            messagebox.showinfo("Success", f"DOCX file rebuilt successfully. Original backed up as {os.path.basename(backup_file)}")
+            
+            # Reload the document
+            self.load_document(self.current_file)
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to rebuild DOCX file: {str(e)}")
+    
     def show_help(self):
         help_text = """DOCX Editor Help
 
@@ -2066,6 +2253,11 @@ Advanced Features:
 - Section Breaks: Divide your document into sections with different layouts
 - Table of Contents: Automatically generate based on heading styles
 - Page Numbers: Add page numbers to footers
+
+Developer Features:
+- Developer Mode: Enable XML editing of DOCX files
+- Edit XML Structure: View and edit the raw XML files in the DOCX
+- Specific XML Editors: Edit core.xml, document.xml, styles.xml directly
 
 Shortcuts:
 - Ctrl+N: New document
