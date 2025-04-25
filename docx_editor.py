@@ -386,6 +386,65 @@ class DocxEditor:
             self.update_document_structure()
             self.status_var.set("New document created")
     
+    def auto_load_example_document(self):
+        """Automatically load the first .docx file found in the project directory"""
+        docx_files = []
+        for root, dirs, files in os.walk(os.path.dirname(os.path.abspath(__file__))):
+            for file in files:
+                if file.endswith('.docx'):
+                    docx_files.append(os.path.join(root, file))
+        
+        # If any .docx files were found, load the first one
+        if docx_files:
+            first_docx = docx_files[0]
+            try:
+                self.load_document(first_docx)
+                self.status_var.set(f"Automatically loaded: {os.path.basename(first_docx)}")
+            except Exception as e:
+                self.status_var.set(f"Error loading example document: {str(e)}")
+    
+    def load_document(self, file_path):
+        """Load a document from the specified file path"""
+        try:
+            self.document = Document(file_path)
+            self.current_file = file_path
+            self.document_images = []
+            
+            # Extract text and content from document
+            text_content = ""
+            for para in self.document.paragraphs:
+                # Check for headings and add appropriate markdown
+                if para.style and para.style.name.startswith('Heading 1'):
+                    text_content += f"# {para.text}\n"
+                elif para.style and para.style.name.startswith('Heading 2'):
+                    text_content += f"## {para.text}\n"
+                elif para.style and para.style.name.startswith('Heading 3'):
+                    text_content += f"### {para.text}\n"
+                else:
+                    text_content += para.text + "\n"
+            
+            # Handle tables (just add placeholders in the text for now)
+            if self.document.tables:
+                self.tables = self.document.tables
+                for i, table in enumerate(self.document.tables):
+                    text_content += f"\n[TABLE {i+1}]\n"
+            
+            # Update UI
+            self.text_editor.delete(1.0, tk.END)
+            self.text_editor.insert(tk.END, text_content)
+            
+            # Update document structure tab
+            self.update_document_structure()
+            
+            # Update the headings navigation dropdown
+            if hasattr(self, 'update_headings_navigation'):
+                self.update_headings_navigation()
+            
+            return True
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load document: {str(e)}")
+            return False
+    
     def open_file(self):
         file_path = filedialog.askopenfilename(
             filetypes=[("Word Documents", "*.docx"), ("All Files", "*.*")]
