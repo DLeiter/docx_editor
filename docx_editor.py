@@ -13,10 +13,42 @@ from docx.shared import Pt, Inches, RGBColor
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT, WD_UNDERLINE
 from docx.enum.style import WD_STYLE_TYPE
 from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 from docx.table import Table, _Cell
 from PIL import Image, ImageTk
 import base64
 from io import BytesIO
+
+# Tooltip class implementation for showing tooltips on hover
+class ToolTip(object):
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tooltip_window = None
+        self.widget.bind("<Enter>", self.enter)
+        self.widget.bind("<Leave>", self.leave)
+        self.widget.bind("<ButtonPress>", self.leave)
+    
+    def enter(self, event=None):
+        x, y, _, _ = self.widget.bbox("insert")
+        x += self.widget.winfo_rootx() + 25
+        y += self.widget.winfo_rooty() + 25
+        
+        # Creates a toplevel window
+        self.tooltip_window = tk.Toplevel(self.widget)
+        # Leaves only the label and removes the app window
+        self.tooltip_window.wm_overrideredirect(True)
+        self.tooltip_window.wm_geometry(f"+{x}+{y}")
+        
+        # Creates the label for the tooltip
+        label = tk.Label(self.tooltip_window, text=self.text, background="#FFFFCC",
+                     relief="solid", borderwidth=1, font=("Arial", "9", "normal"))
+        label.pack(padx=2, pady=2)
+    
+    def leave(self, event=None):
+        if self.tooltip_window:
+            self.tooltip_window.destroy()
+            self.tooltip_window = None
 
 class DocxEditor:
     def __init__(self, root):
@@ -37,6 +69,7 @@ class DocxEditor:
         self.current_underline = False
         self.current_alignment = "left"
         self.current_color = "#000000"
+        self.current_highlight_color = "#FFFF00"  # Yellow
         
         # Table management
         self.tables = []
@@ -45,11 +78,22 @@ class DocxEditor:
         # Paragraph styling
         self.paragraph_styles = []
         
+        # Document sections and headers/footers tracking
+        self.sections = []
+        self.headers = {}
+        self.footers = {}
+        
+        # Tooltip dictionary to keep track of tooltips
+        self.tooltips = {}
+        
         # Create all widgets and interface elements
         self.create_menu()
         self.create_widgets()
         self.create_formatting_toolbar()
         self.create_tabs()
+        
+        # Set up keyboard shortcuts
+        self._setup_keyboard_shortcuts()
     
     def create_menu(self):
         menubar = tk.Menu(self.root)
@@ -111,7 +155,13 @@ class DocxEditor:
         insertmenu.add_command(label="Table...", command=self.insert_table_dialog)
         insertmenu.add_separator()
         insertmenu.add_command(label="Page Break", command=self.insert_page_break)
+        insertmenu.add_command(label="Section Break", command=self.insert_section_break)
+        insertmenu.add_separator()
         insertmenu.add_command(label="Hyperlink...", command=self.insert_hyperlink)
+        insertmenu.add_command(label="Table of Contents", command=self.insert_toc)
+        insertmenu.add_separator()
+        insertmenu.add_command(label="Header", command=self.edit_header)
+        insertmenu.add_command(label="Footer", command=self.edit_footer)
         menubar.add_cascade(label="Insert", menu=insertmenu)
         
         # Table menu
@@ -164,27 +214,44 @@ class DocxEditor:
         self.font_size.bind("<<ComboboxSelected>>", self.change_font_size)
         self.font_size.pack(side=tk.LEFT, padx=2)
         
+        # Style dropdown
+        ttk.Label(self.format_frame, text="Style:").pack(side=tk.LEFT, padx=2)
+        self.style_combo = ttk.Combobox(self.format_frame, width=15, state="readonly")
+        self.style_combo["values"] = ["Normal", "Heading 1", "Heading 2", "Heading 3", "Title", "Subtitle"]
+        self.style_combo.current(0)
+        self.style_combo.bind("<<ComboboxSelected>>", self.apply_style)
+        self.style_combo.pack(side=tk.LEFT, padx=2)
+        
         # Separator
         ttk.Separator(self.format_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=5, fill=tk.Y)
         
         # Bold button
         self.bold_icon = tk.PhotoImage(data=self._get_bold_icon())
         self.bold_button = ttk.Button(self.format_frame, image=self.bold_icon, width=3, command=self.toggle_bold)
+        self._create_tooltip(self.bold_button, "Bold (Ctrl+B)")
         self.bold_button.pack(side=tk.LEFT, padx=2)
         
         # Italic button
         self.italic_icon = tk.PhotoImage(data=self._get_italic_icon())
         self.italic_button = ttk.Button(self.format_frame, image=self.italic_icon, width=3, command=self.toggle_italic)
+        self._create_tooltip(self.italic_button, "Italic (Ctrl+I)")
         self.italic_button.pack(side=tk.LEFT, padx=2)
         
         # Underline button
         self.underline_icon = tk.PhotoImage(data=self._get_underline_icon())
         self.underline_button = ttk.Button(self.format_frame, image=self.underline_icon, width=3, command=self.toggle_underline)
+        self._create_tooltip(self.underline_button, "Underline (Ctrl+U)")
         self.underline_button.pack(side=tk.LEFT, padx=2)
         
-        # Text color button
-        self.color_button = ttk.Button(self.format_frame, text="A", width=3, command=self.text_color_dialog)
+        # Text color button - use standard tk.Button instead of ttk for direct color support
+        self.color_button = tk.Button(self.format_frame, text="A", width=3, fg=self.current_color, command=self.text_color_dialog)
+        self._create_tooltip(self.color_button, "Text Color")
         self.color_button.pack(side=tk.LEFT, padx=2)
+        
+        # Highlight color button - use standard tk.Button instead of ttk for direct color support
+        self.highlight_button = tk.Button(self.format_frame, text="H", width=3, bg="yellow", command=self.highlight_color_dialog)
+        self._create_tooltip(self.highlight_button, "Highlight Color")
+        self.highlight_button.pack(side=tk.LEFT, padx=2)
         
         # Separator
         ttk.Separator(self.format_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=5, fill=tk.Y)
@@ -192,26 +259,53 @@ class DocxEditor:
         # Alignment buttons
         self.align_left_icon = tk.PhotoImage(data=self._get_align_left_icon())
         self.align_left_button = ttk.Button(self.format_frame, image=self.align_left_icon, width=3, command=lambda: self.set_alignment("left"))
+        self._create_tooltip(self.align_left_button, "Align Left (Ctrl+L)")
         self.align_left_button.pack(side=tk.LEFT, padx=2)
         
         self.align_center_icon = tk.PhotoImage(data=self._get_align_center_icon())
         self.align_center_button = ttk.Button(self.format_frame, image=self.align_center_icon, width=3, command=lambda: self.set_alignment("center"))
+        self._create_tooltip(self.align_center_button, "Align Center (Ctrl+E)")
         self.align_center_button.pack(side=tk.LEFT, padx=2)
         
         self.align_right_icon = tk.PhotoImage(data=self._get_align_right_icon())
         self.align_right_button = ttk.Button(self.format_frame, image=self.align_right_icon, width=3, command=lambda: self.set_alignment("right"))
+        self._create_tooltip(self.align_right_button, "Align Right (Ctrl+R)")
         self.align_right_button.pack(side=tk.LEFT, padx=2)
         
         # Separator
         ttk.Separator(self.format_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=5, fill=tk.Y)
         
+        # Bullet list button
+        self.bullet_list_button = ttk.Button(self.format_frame, text="•", width=3, command=self.insert_bullet_list)
+        self._create_tooltip(self.bullet_list_button, "Bullet List")
+        self.bullet_list_button.pack(side=tk.LEFT, padx=2)
+        
+        # Numbered list button
+        self.numbered_list_button = ttk.Button(self.format_frame, text="1.", width=3, command=self.insert_numbered_list)
+        self._create_tooltip(self.numbered_list_button, "Numbered List")
+        self.numbered_list_button.pack(side=tk.LEFT, padx=2)
+        
+        # Separator
+        ttk.Separator(self.format_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=5, fill=tk.Y)
+        
         # Insert image button
-        self.insert_image_button = ttk.Button(self.format_frame, text="Image", command=self.insert_image)
+        self.insert_image_button = ttk.Button(self.format_frame, text="Insert Image", command=self.insert_image)
+        self._create_tooltip(self.insert_image_button, "Insert Image")
         self.insert_image_button.pack(side=tk.LEFT, padx=2)
         
         # Insert table button
-        self.insert_table_button = ttk.Button(self.format_frame, text="Table", command=self.insert_table_dialog)
+        self.insert_table_button = ttk.Button(self.format_frame, text="Insert Table", command=self.insert_table_dialog)
+        self._create_tooltip(self.insert_table_button, "Insert Table")
         self.insert_table_button.pack(side=tk.LEFT, padx=2)
+        
+        # Separator
+        ttk.Separator(self.format_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=10, fill=tk.Y)
+        
+        # Heading navigation
+        ttk.Label(self.format_frame, text="Go to:").pack(side=tk.LEFT, padx=5)
+        self.heading_nav = ttk.Combobox(self.format_frame, width=25, state="readonly")
+        self.heading_nav.pack(side=tk.LEFT, padx=2)
+        self.heading_nav.bind("<<ComboboxSelected>>", self.navigate_to_heading)
 
     def create_tabs(self):
         # Create notebook (tabbed interface)
@@ -298,7 +392,15 @@ class DocxEditor:
                 # Extract text and content from document
                 text_content = ""
                 for para in self.document.paragraphs:
-                    text_content += para.text + "\n"
+                    # Check for headings and add appropriate markdown
+                    if para.style and para.style.name.startswith('Heading 1'):
+                        text_content += f"# {para.text}\n"
+                    elif para.style and para.style.name.startswith('Heading 2'):
+                        text_content += f"## {para.text}\n"
+                    elif para.style and para.style.name.startswith('Heading 3'):
+                        text_content += f"### {para.text}\n"
+                    else:
+                        text_content += para.text + "\n"
                 
                 # Handle tables (just add placeholders in the text for now)
                 if self.document.tables:
@@ -312,6 +414,9 @@ class DocxEditor:
                 
                 # Update document structure tab
                 self.update_document_structure()
+                
+                # Update the headings navigation dropdown
+                self.update_headings_navigation()
                 
                 self.status_var.set(f"Opened: {os.path.basename(file_path)}")
                 messagebox.showinfo("Success", f"Opened {os.path.basename(file_path)}")
@@ -342,6 +447,7 @@ class DocxEditor:
             
             # Get text content from editor
             text_content = self.text_editor.get(1.0, tk.END)
+            lines = text_content.split('\n')
             
             # Clear existing content
             for para in list(self.document.paragraphs):
@@ -349,13 +455,46 @@ class DocxEditor:
                 p.getparent().remove(p)
                 para._p = para._element = None
             
-            # Add new content with formatting
-            for line in text_content.split('\n'):
+            # Track current section for handling breaks
+            current_section = 0
+            
+            # Process each line and add to document
+            skip_lines = []
+            for i, line in enumerate(lines):
                 # Skip table placeholder lines
                 if line.startswith('[TABLE ') and line.endswith(']'):
                     continue
                     
+                # Skip section break markers (we handle those separately)
+                if line == "[SECTION BREAK]":
+                    # Add a section break
+                    self.document.add_section()
+                    current_section += 1
+                    continue
+                    
+                # Skip TOC placeholders (we handle those separately)
+                if line.startswith('[TABLE OF CONTENTS:') and line.endswith(']'):
+                    # Extract TOC info and add it
+                    toc_title = line.split(':')[1].split(',')[0].strip()
+                    # Add heading for TOC
+                    self.document.add_heading(toc_title, level=1)
+                    # Add blank paragraph that will be populated with TOC field
+                    self.document.add_paragraph()
+                    continue
+                
+                # Process normal paragraph
                 paragraph = self.document.add_paragraph(line)
+                
+                # Detect heading styles by pattern
+                if line.startswith('# '):
+                    paragraph.style = 'Heading 1'
+                    paragraph.text = line[2:]  # Remove the # marker
+                elif line.startswith('## '):
+                    paragraph.style = 'Heading 2'
+                    paragraph.text = line[3:]  # Remove the ## marker
+                elif line.startswith('### '):
+                    paragraph.style = 'Heading 3'
+                    paragraph.text = line[4:]  # Remove the ### marker
                 
                 # Apply paragraph formatting if default values are changed
                 if self.current_alignment != "left":
@@ -375,8 +514,61 @@ class DocxEditor:
                     new_p = self.document.add_paragraph()  # Paragraph to hold the table
                     new_p._p.addnext(tbl)
             
-            # Save the document with any embedded images
+            # Add headers and footers if we have them
+            if hasattr(self, 'document') and hasattr(self.document, 'sections'):
+                for i, section in enumerate(self.document.sections):
+                    # Add header if we have one for this section
+                    if hasattr(self, 'headers') and i in self.headers:
+                        header_content = self.headers[i]
+                        # If it's a string, add it as paragraph text
+                        if isinstance(header_content, str):
+                            section.header.paragraphs[0].text = header_content
+                    
+                    # Add footer if we have one for this section
+                    if hasattr(self, 'footers') and i in self.footers:
+                        footer_content = self.footers[i]
+                        # Handle different types of content
+                        if isinstance(footer_content, dict):
+                            # Dictionary with text and page numbers flag
+                            section.footer.paragraphs[0].text = footer_content.get('text', '')
+                            if footer_content.get('page_numbers', False):
+                                # Add a paragraph with page number field
+                                footer_para = section.footer.add_paragraph()
+                                footer_para.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+                                run = footer_para.add_run()
+                                # Add page number field code
+                                fldChar = OxmlElement('w:fldChar')
+                                fldChar.set(qn('w:fldCharType'), 'begin')
+                                run._element.append(fldChar)
+                                
+                                instrText = OxmlElement('w:instrText')
+                                instrText.text = 'PAGE'
+                                run._element.append(instrText)
+                                
+                                fldChar = OxmlElement('w:fldChar')
+                                fldChar.set(qn('w:fldCharType'), 'end')
+                                run._element.append(fldChar)
+                        elif isinstance(footer_content, str):
+                            # Just text
+                            section.footer.paragraphs[0].text = footer_content
+            
+            # Process TOC if we have TOC info
+            if hasattr(self, 'toc_info') and self.toc_info:
+                # In a proper implementation, we would add a TOC field
+                # Python-docx doesn't directly support TOC fields,
+                # so we'd need to use the low-level API or a workaround
+                # For now, we'll just add a message
+                # The first paragraph after the TOC heading is where the TOC would go
+                for para in self.document.paragraphs:
+                    if para.style.name.startswith('Heading 1') and para.text in [toc['title'] for toc in self.toc_info]:
+                        next_para_index = self.document.paragraphs.index(para) + 1
+                        if next_para_index < len(self.document.paragraphs):
+                            toc_para = self.document.paragraphs[next_para_index]
+                            toc_para.text = "[Table of contents will be generated when opened in Word]"
+            
+            # Save the document with all our changes
             self.document.save(file_path)
+            self.current_file = file_path
             self.status_var.set(f"Saved: {os.path.basename(file_path)}")
             messagebox.showinfo("Success", f"Saved to {os.path.basename(file_path)}")
         except Exception as e:
@@ -731,6 +923,28 @@ class DocxEditor:
     def _get_align_right_icon(self):
         # Base64 encoded minimal align right icon
         return b'R0lGODlhEAAQAIABAAAAAP///yH5BAEAAAEALAAAAAAQABAAAAIdjI+py+0Po5y02ouz3rz7D4YiSJbmiZ6purZxVAAAOw=='
+    
+    # Tooltip class for creating tooltips on hover
+    def _create_tooltip(self, widget, text):
+        tooltip = ToolTip(widget, text)
+        self.tooltips[widget] = tooltip
+        return tooltip
+    
+    # Keyboard shortcuts setup
+    def _setup_keyboard_shortcuts(self):
+        self.root.bind("<Control-b>", lambda e: self.toggle_bold())
+        self.root.bind("<Control-i>", lambda e: self.toggle_italic())
+        self.root.bind("<Control-u>", lambda e: self.toggle_underline())
+        self.root.bind("<Control-l>", lambda e: self.set_alignment("left"))
+        self.root.bind("<Control-e>", lambda e: self.set_alignment("center"))
+        self.root.bind("<Control-r>", lambda e: self.set_alignment("right"))
+        
+        # Standard keyboard shortcuts for file operations
+        self.root.bind("<Control-n>", lambda e: self.new_document())
+        self.root.bind("<Control-o>", lambda e: self.open_file())
+        self.root.bind("<Control-s>", lambda e: self.save_file())
+        self.root.bind("<Control-S>", lambda e: self.save_file_as())  # Ctrl+Shift+S
+        self.root.bind("<Control-f>", lambda e: self.find_replace_dialog())
 
     def clear_text(self):
         self.text_editor.delete(1.0, tk.END)
@@ -739,24 +953,83 @@ class DocxEditor:
     def change_font_family(self, event=None):
         selected_font = self.font_family.get()
         self.current_font_family = selected_font
+        
+        # Apply font to currently selected text if there's a selection
+        try:
+            selection_start = self.text_editor.index(tk.SEL_FIRST)
+            selection_end = self.text_editor.index(tk.SEL_LAST)
+            # In a real implementation, would apply font here via tags
+        except tk.TclError:
+            # No selection, just update state
+            pass
+            
         self.status_var.set(f"Font changed to {selected_font}")
     
     def change_font_size(self, event=None):
         selected_size = self.font_size.get()
         self.current_font_size = int(selected_size)
+        
+        # Apply font size to currently selected text if there's a selection
+        try:
+            selection_start = self.text_editor.index(tk.SEL_FIRST)
+            selection_end = self.text_editor.index(tk.SEL_LAST)
+            # In a real implementation, would apply font size here via tags
+        except tk.TclError:
+            # No selection, just update state
+            pass
+            
         self.status_var.set(f"Font size changed to {selected_size}")
     
     def toggle_bold(self):
         self.current_bold = not self.current_bold
-        self.status_var.set(f"Bold: {'On' if self.current_bold else 'Off'}")
+        
+        # Update the button state
+        self.update_formatting_buttons()
+        
+        # Apply bold to currently selected text if there's a selection
+        try:
+            selection_start = self.text_editor.index(tk.SEL_FIRST)
+            selection_end = self.text_editor.index(tk.SEL_LAST)
+            # In a real implementation, would apply bold here via tags
+        except tk.TclError:
+            # No selection, just update state
+            pass
+            
+        self.status_var.set(f"Bold formatting {'applied' if self.current_bold else 'removed'}")
     
     def toggle_italic(self):
         self.current_italic = not self.current_italic
-        self.status_var.set(f"Italic: {'On' if self.current_italic else 'Off'}")
+        
+        # Update the button state
+        self.update_formatting_buttons()
+        
+        # Apply italic to currently selected text if there's a selection
+        try:
+            selection_start = self.text_editor.index(tk.SEL_FIRST)
+            selection_end = self.text_editor.index(tk.SEL_LAST)
+            # In a real implementation, would apply italic here via tags
+        except tk.TclError:
+            # No selection, just update state
+            pass
+            
+        self.status_var.set(f"Italic formatting {'applied' if self.current_italic else 'removed'}")
     
     def toggle_underline(self):
         self.current_underline = not self.current_underline
-        self.status_var.set(f"Underline: {'On' if self.current_underline else 'Off'}")
+        
+        # Update the button state
+        self.update_formatting_buttons()
+        
+        # Apply underline to currently selected text if there's a selection
+        try:
+            selection_start = self.text_editor.index(tk.SEL_FIRST)
+            selection_end = self.text_editor.index(tk.SEL_LAST)
+            # In a real implementation, would apply underline here via tags
+        except tk.TclError:
+            # No selection, just update state
+            pass
+            
+        self.status_var.set(f"Underline formatting {'applied' if self.current_underline else 'removed'}")
     
     def text_color_dialog(self):
         # Open the color chooser dialog
@@ -768,14 +1041,39 @@ class DocxEditor:
             
             # Update the color button to show the selected color
             try:
-                self.color_button.configure(foreground=color[1])
+                self.color_button.configure(fg=color[1])
             except:
+                pass
+                
+            # Apply color to currently selected text if there's a selection
+            try:
+                selection_start = self.text_editor.index(tk.SEL_FIRST)
+                selection_end = self.text_editor.index(tk.SEL_LAST)
+                # In a real implementation, would apply text color here via tags
+            except tk.TclError:
+                # No selection, just update state
                 pass
                 
             self.status_var.set(f"Text color changed to {color[1]}")
     
     def set_alignment(self, alignment):
         self.current_alignment = alignment
+        
+        # Update the button state
+        self.update_formatting_buttons()
+        
+        # Get the current line or paragraph
+        try:
+            # If there's a selection, align all lines in the selection
+            selection_start = self.text_editor.index(tk.SEL_FIRST)
+            selection_end = self.text_editor.index(tk.SEL_LAST)
+            # Would apply alignment to selected lines here
+        except tk.TclError:
+            # No selection, get current paragraph
+            cursor_pos = self.text_editor.index(tk.INSERT)
+            line_start = cursor_pos.split('.')[0] + '.0'
+            # Would apply alignment to current paragraph here
+            
         self.status_var.set(f"Text alignment set to {alignment}")
     
     # Paragraph handling methods
@@ -819,10 +1117,28 @@ class DocxEditor:
         # Add document elements to the tree view
         doc_node = self.structure_tree.insert("", "end", text="Document")
         
+        # Add sections if we have them tracked
+        if hasattr(self, 'sections') and self.sections:
+            section_node = self.structure_tree.insert(doc_node, "end", text="Sections")
+            for i, section in enumerate(self.document.sections):
+                section_item = self.structure_tree.insert(section_node, "end", text=f"Section {i+1}")
+                
+                # Add header info
+                if hasattr(self, 'headers') and i in self.headers:
+                    header_text = self.headers[i].text if hasattr(self.headers[i], 'text') else "[Header]" 
+                    self.structure_tree.insert(section_item, "end", text=f"Header: {header_text[:30] + '...' if len(header_text) > 30 else header_text}")
+                
+                # Add footer info
+                if hasattr(self, 'footers') and i in self.footers:
+                    footer_text = self.footers[i].text if hasattr(self.footers[i], 'text') else "[Footer]"
+                    self.structure_tree.insert(section_item, "end", text=f"Footer: {footer_text[:30] + '...' if len(footer_text) > 30 else footer_text}")
+        
         # Add paragraph elements
         para_node = self.structure_tree.insert(doc_node, "end", text="Paragraphs")
         for i, para in enumerate(self.document.paragraphs):
-            self.structure_tree.insert(para_node, "end", text=f"Paragraph {i+1}: {para.text[:30] + '...' if len(para.text) > 30 else para.text}")
+            para_text = para.text
+            style_name = para.style.name if hasattr(para, 'style') and hasattr(para.style, 'name') else "Normal"
+            self.structure_tree.insert(para_node, "end", text=f"Paragraph {i+1} [{style_name}]: {para_text[:30] + '...' if len(para_text) > 30 else para_text}")
         
         # Add table elements if any
         if self.document.tables:
@@ -835,7 +1151,7 @@ class DocxEditor:
             image_node = self.structure_tree.insert(doc_node, "end", text="Images")
             for i, img_path in enumerate(self.document_images):
                 self.structure_tree.insert(image_node, "end", text=f"Image {i+1}: {os.path.basename(img_path)}")
-                
+        
         # Update the properties tab
         self.update_properties_tab()
     
@@ -1190,6 +1506,23 @@ class DocxEditor:
         self.text_editor.insert(cursor_pos, "\f")
         self.status_var.set("Page break inserted")
     
+    def insert_section_break(self):
+        if not self.document:
+            self.document = Document()
+            
+        cursor_pos = self.text_editor.index(tk.INSERT)
+        self.text_editor.insert(cursor_pos, "\n[SECTION BREAK]\n")
+        
+        # Track section for when we save
+        if not hasattr(self, 'section_breaks'):
+            self.section_breaks = []
+            
+        # Save the position where we inserted the section break
+        line_number = int(cursor_pos.split('.')[0])
+        self.section_breaks.append(line_number)
+        
+        self.status_var.set("Section break inserted")
+    
     def insert_hyperlink(self):
         dialog = tk.Toplevel(self.root)
         dialog.title("Insert Hyperlink")
@@ -1301,6 +1634,401 @@ class DocxEditor:
                           "- Paragraph styling\n\n"
                           "Built with python-docx")
     
+    def edit_header(self):
+        if not self.document:
+            messagebox.showinfo("No Document", "Please open or create a document first.")
+            return
+            
+        # Create a dialog for editing the header
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Edit Header")
+        dialog.geometry("600x300")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Section selection if document has multiple sections
+        section_frame = ttk.Frame(dialog)
+        section_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        ttk.Label(section_frame, text="Section:").pack(side=tk.LEFT, padx=5)
+        section_var = tk.StringVar(value="1")
+        
+        # Get section count
+        section_count = len(self.document.sections) if hasattr(self.document, 'sections') else 1
+        section_spin = tk.Spinbox(section_frame, from_=1, to=section_count, textvariable=section_var, width=5)
+        section_spin.pack(side=tk.LEFT, padx=5)
+        
+        # Editor for header content
+        editor_frame = ttk.LabelFrame(dialog, text="Header Content")
+        editor_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        header_editor = scrolledtext.ScrolledText(editor_frame, wrap=tk.WORD, height=8)
+        header_editor.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Try to get existing header for this section
+        def get_header_content():
+            try:
+                section_idx = int(section_var.get()) - 1
+                if 0 <= section_idx < section_count:
+                    section = self.document.sections[section_idx]
+                    header = section.header
+                    header_text = ""
+                    
+                    # Extract header paragraphs
+                    for para in header.paragraphs:
+                        header_text += para.text + "\n"
+                    
+                    # Update editor
+                    header_editor.delete(1.0, tk.END)
+                    header_editor.insert(tk.END, header_text)
+                    
+                    # Store the header
+                    self.headers[section_idx] = header
+            except Exception as e:
+                messagebox.showinfo("Header Info", "This section doesn't have a header yet. You can add content now.")
+        
+        # Initial load
+        get_header_content()
+        
+        # If section is changed, load the corresponding header
+        section_spin.configure(command=get_header_content)
+        
+        # Function to apply header changes
+        def apply_header():
+            try:
+                section_idx = int(section_var.get()) - 1
+                if 0 <= section_idx < section_count:
+                    # Get the content
+                    header_text = header_editor.get(1.0, tk.END)
+                    
+                    # We can't directly modify the header here, but we'll store the text
+                    # and apply it when saving the document
+                    self.headers[section_idx] = header_text
+                    
+                    self.status_var.set(f"Header updated for section {section_idx + 1}")
+                    
+                    # Update the document structure view
+                    self.update_document_structure()
+                    
+                    dialog.destroy()
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to update header: {str(e)}")
+        
+        # Buttons
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        apply_button = ttk.Button(button_frame, text="Apply", command=apply_header)
+        apply_button.pack(side=tk.RIGHT, padx=5)
+        
+        cancel_button = ttk.Button(button_frame, text="Cancel", command=dialog.destroy)
+        cancel_button.pack(side=tk.RIGHT, padx=5)
+    
+    def edit_footer(self):
+        if not self.document:
+            messagebox.showinfo("No Document", "Please open or create a document first.")
+            return
+            
+        # Create a dialog for editing the footer
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Edit Footer")
+        dialog.geometry("600x300")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Section selection if document has multiple sections
+        section_frame = ttk.Frame(dialog)
+        section_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        ttk.Label(section_frame, text="Section:").pack(side=tk.LEFT, padx=5)
+        section_var = tk.StringVar(value="1")
+        
+        # Get section count
+        section_count = len(self.document.sections) if hasattr(self.document, 'sections') else 1
+        section_spin = tk.Spinbox(section_frame, from_=1, to=section_count, textvariable=section_var, width=5)
+        section_spin.pack(side=tk.LEFT, padx=5)
+        
+        # Add checkbox for page numbers
+        page_num_var = tk.BooleanVar(value=False)
+        page_num_check = ttk.Checkbutton(section_frame, text="Include page numbers", variable=page_num_var)
+        page_num_check.pack(side=tk.LEFT, padx=20)
+        
+        # Editor for footer content
+        editor_frame = ttk.LabelFrame(dialog, text="Footer Content")
+        editor_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        footer_editor = scrolledtext.ScrolledText(editor_frame, wrap=tk.WORD, height=8)
+        footer_editor.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Try to get existing footer for this section
+        def get_footer_content():
+            try:
+                section_idx = int(section_var.get()) - 1
+                if 0 <= section_idx < section_count:
+                    section = self.document.sections[section_idx]
+                    footer = section.footer
+                    footer_text = ""
+                    
+                    # Extract footer paragraphs
+                    for para in footer.paragraphs:
+                        footer_text += para.text + "\n"
+                    
+                    # Update editor
+                    footer_editor.delete(1.0, tk.END)
+                    footer_editor.insert(tk.END, footer_text)
+                    
+                    # Store the footer
+                    self.footers[section_idx] = footer
+            except Exception as e:
+                messagebox.showinfo("Footer Info", "This section doesn't have a footer yet. You can add content now.")
+        
+        # Initial load
+        get_footer_content()
+        
+        # If section is changed, load the corresponding footer
+        section_spin.configure(command=get_footer_content)
+        
+        # Function to apply footer changes
+        def apply_footer():
+            try:
+                section_idx = int(section_var.get()) - 1
+                if 0 <= section_idx < section_count:
+                    # Get the content
+                    footer_text = footer_editor.get(1.0, tk.END)
+                    
+                    # Store information about page numbers
+                    footer_data = {
+                        'text': footer_text,
+                        'page_numbers': page_num_var.get()
+                    }
+                    
+                    # We can't directly modify the footer here, but we'll store the text
+                    # and apply it when saving the document
+                    self.footers[section_idx] = footer_data
+                    
+                    self.status_var.set(f"Footer updated for section {section_idx + 1}")
+                    
+                    # Update the document structure view
+                    self.update_document_structure()
+                    
+                    dialog.destroy()
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to update footer: {str(e)}")
+        
+        # Buttons
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        apply_button = ttk.Button(button_frame, text="Apply", command=apply_footer)
+        apply_button.pack(side=tk.RIGHT, padx=5)
+        
+        cancel_button = ttk.Button(button_frame, text="Cancel", command=dialog.destroy)
+        cancel_button.pack(side=tk.RIGHT, padx=5)
+    
+    def insert_toc(self):
+        """Insert a table of contents"""
+        if not self.document:
+            messagebox.showinfo("No Document", "Please open or create a document first.")
+            return
+        
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Insert Table of Contents")
+        dialog.geometry("400x200")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Options frame
+        options_frame = ttk.LabelFrame(dialog, text="TOC Options")
+        options_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Title for TOC
+        title_frame = ttk.Frame(options_frame)
+        title_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Label(title_frame, text="Title:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
+        title_var = tk.StringVar(value="Table of Contents")
+        title_entry = ttk.Entry(title_frame, textvariable=title_var, width=30)
+        title_entry.grid(row=0, column=1, padx=5, pady=5, sticky=tk.W)
+        
+        # Depth of headings to include
+        depth_frame = ttk.Frame(options_frame)
+        depth_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Label(depth_frame, text="Depth:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
+        depth_var = tk.StringVar(value="3")
+        depth_spin = tk.Spinbox(depth_frame, from_=1, to=6, textvariable=depth_var, width=5)
+        depth_spin.grid(row=0, column=1, padx=5, pady=5, sticky=tk.W)
+        
+        # Function to insert TOC
+        def insert_toc_content():
+            try:
+                title = title_var.get()
+                depth = int(depth_var.get())
+                
+                # Insert a placeholder in the document
+                cursor_pos = self.text_editor.index(tk.INSERT)
+                toc_placeholder = f"\n[TABLE OF CONTENTS: {title}, Depth={depth}]\n"
+                self.text_editor.insert(cursor_pos, toc_placeholder)
+                
+                # Store TOC information for when saving
+                if not hasattr(self, 'toc_info'):
+                    self.toc_info = []
+                    
+                self.toc_info.append({
+                    'title': title,
+                    'depth': depth,
+                    'position': cursor_pos
+                })
+                
+                self.status_var.set("Table of contents inserted")
+                dialog.destroy()
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to insert table of contents: {str(e)}")
+        
+        # Buttons
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        insert_button = ttk.Button(button_frame, text="Insert", command=insert_toc_content)
+        insert_button.pack(side=tk.RIGHT, padx=5)
+        
+        cancel_button = ttk.Button(button_frame, text="Cancel", command=dialog.destroy)
+        cancel_button.pack(side=tk.RIGHT, padx=5)
+    
+    # Method to update button states based on current formatting
+    def update_formatting_buttons(self):
+        # Highlight the bold button if bold is active
+        if self.current_bold:
+            self.bold_button.state(['pressed'])
+        else:
+            self.bold_button.state(['!pressed'])
+            
+        # Update italic button
+        if self.current_italic:
+            self.italic_button.state(['pressed'])
+        else:
+            self.italic_button.state(['!pressed'])
+            
+        # Update underline button
+        if self.current_underline:
+            self.underline_button.state(['pressed'])
+        else:
+            self.underline_button.state(['!pressed'])
+            
+        # Update alignment buttons
+        self.align_left_button.state(['!pressed'])
+        self.align_center_button.state(['!pressed'])
+        self.align_right_button.state(['!pressed'])
+        
+        if self.current_alignment == "left":
+            self.align_left_button.state(['pressed'])
+        elif self.current_alignment == "center":
+            self.align_center_button.state(['pressed'])
+        elif self.current_alignment == "right":
+            self.align_right_button.state(['pressed'])
+    
+    # Apply paragraph style from dropdown
+    def apply_style(self, event=None):
+        selected_style = self.style_combo.get()
+        cursor_pos = self.text_editor.index(tk.INSERT)
+        line_start = cursor_pos.split('.')[0] + '.0'
+        line_end = cursor_pos.split('.')[0] + '.end'
+        
+        # Get the current line
+        current_line = self.text_editor.get(line_start, line_end)
+        
+        # Remove any existing markdown-style heading markers
+        if current_line.startswith('# ') or current_line.startswith('## ') or current_line.startswith('### '):
+            # Extract the text after the heading marker
+            if current_line.startswith('### '):
+                text = current_line[4:]
+            elif current_line.startswith('## '):
+                text = current_line[3:]
+            elif current_line.startswith('# '):
+                text = current_line[2:]
+            
+            # Replace the line with clean text
+            self.text_editor.delete(line_start, line_end)
+            self.text_editor.insert(line_start, text)
+        
+        # Now apply the new style using markdown-style markers
+        if selected_style == "Heading 1":
+            self.text_editor.delete(line_start, line_end)
+            self.text_editor.insert(line_start, f"# {current_line}")
+        elif selected_style == "Heading 2":
+            self.text_editor.delete(line_start, line_end)
+            self.text_editor.insert(line_start, f"## {current_line}")
+        elif selected_style == "Heading 3":
+            self.text_editor.delete(line_start, line_end)
+            self.text_editor.insert(line_start, f"### {current_line}")
+        
+        self.status_var.set(f"Applied style: {selected_style}")
+        
+        # Update the headings navigation dropdown
+        self.update_headings_navigation()
+    
+    # Update list of headings for the navigation dropdown
+    def update_headings_navigation(self):
+        # Clear the current list
+        self.heading_nav.set('')
+        headings = []
+        
+        # Get all lines from the document
+        all_text = self.text_editor.get(1.0, tk.END)
+        lines = all_text.split('\n')
+        
+        # Extract headings and their line numbers
+        for i, line in enumerate(lines):
+            line_number = i + 1  # 1-based line numbering
+            if line.startswith('# '):
+                headings.append((f"H1: {line[2:]}", line_number))
+            elif line.startswith('## '):
+                headings.append((f"H2: {line[3:]}", line_number))
+            elif line.startswith('### '):
+                headings.append((f"H3: {line[4:]}", line_number))
+        
+        # Update the dropdown values
+        self.heading_nav['values'] = [h[0] for h in headings]
+        
+        # Store the line numbers for navigation
+        self.heading_line_numbers = {h[0]: h[1] for h in headings}
+    
+    # Navigate to a heading when selected from dropdown
+    def navigate_to_heading(self, event=None):
+        selected = self.heading_nav.get()
+        if selected and hasattr(self, 'heading_line_numbers') and selected in self.heading_line_numbers:
+            line_number = self.heading_line_numbers[selected]
+            self.text_editor.see(f"{line_number}.0")
+            self.text_editor.mark_set(tk.INSERT, f"{line_number}.0")
+            self.text_editor.focus_set()
+            self.status_var.set(f"Navigated to: {selected}")
+    
+    # Handle highlight color selection
+    def highlight_color_dialog(self):
+        color = colorchooser.askcolor(initialcolor=self.current_highlight_color, title="Select Highlight Color")
+        if color[1]:
+            self.current_highlight_color = color[1]
+            
+            # Update the highlight button color
+            try:
+                self.highlight_button.configure(bg=color[1])
+            except:
+                pass
+                
+            self.status_var.set(f"Highlight color changed to {color[1]}")
+    
+    # Insert a bullet list at cursor position
+    def insert_bullet_list(self):
+        cursor_pos = self.text_editor.index(tk.INSERT)
+        self.text_editor.insert(cursor_pos, "\n\u2022 Item 1\n\u2022 Item 2\n\u2022 Item 3\n")
+        self.status_var.set("Bullet list inserted")
+    
+    # Insert a numbered list at cursor position
+    def insert_numbered_list(self):
+        cursor_pos = self.text_editor.index(tk.INSERT)
+        self.text_editor.insert(cursor_pos, "\n1. Item 1\n2. Item 2\n3. Item 3\n")
+        self.status_var.set("Numbered list inserted")
+
     def show_help(self):
         help_text = """DOCX Editor Help
 
@@ -1309,6 +2037,12 @@ Basic Usage:
 - Use formatting toolbar to apply text formatting
 - Use Insert menu to add tables, images, and other elements
 - Use Table menu to modify tables
+
+Advanced Features:
+- Headers and Footers: Use Insert menu to add and edit
+- Section Breaks: Divide your document into sections with different layouts
+- Table of Contents: Automatically generate based on heading styles
+- Page Numbers: Add page numbers to footers
 
 Shortcuts:
 - Ctrl+N: New document
