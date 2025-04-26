@@ -219,6 +219,8 @@ class DocxEditor:
         devmenu.add_command(label="View Document Properties XML", command=lambda: self.edit_specific_xml("docProps/core.xml"))
         devmenu.add_command(label="View Main Document XML", command=lambda: self.edit_specific_xml("word/document.xml"))
         devmenu.add_command(label="View Styles XML", command=lambda: self.edit_specific_xml("word/styles.xml"))
+        devmenu.add_separator()
+        devmenu.add_command(label="Export Document to XML", command=self.export_to_xml)
         menubar.add_cascade(label="Developer", menu=devmenu)
         
         self.root.config(menu=menubar)
@@ -2239,6 +2241,70 @@ class DocxEditor:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to rebuild DOCX file: {str(e)}")
     
+    def export_to_xml(self):
+        """Export the document's XML content to a standalone XML file"""
+        if not self.document or not self.current_file:
+            messagebox.showinfo("No Document", "Please open a document first.")
+            return
+            
+        # Ask user where to save the XML file
+        default_filename = os.path.splitext(os.path.basename(self.current_file))[0] + ".xml"
+        export_path = filedialog.asksaveasfilename(
+            defaultextension=".xml",
+            filetypes=[("XML files", "*.xml"), ("All files", "*.*")],
+            initialfile=default_filename
+        )
+        
+        if not export_path:
+            return  # User cancelled
+            
+        try:
+            # Create a temp dir if not already created
+            temp_created = False
+            if not self.temp_dir:
+                self.temp_dir = tempfile.mkdtemp()
+                temp_created = True
+                
+                # Extract the docx file
+                with zipfile.ZipFile(self.current_file, 'r') as zip_ref:
+                    zip_ref.extractall(self.temp_dir)
+            
+            # Get the document.xml path
+            document_xml_path = os.path.join(self.temp_dir, "word", "document.xml")
+            
+            if not os.path.exists(document_xml_path):
+                messagebox.showerror("Error", "Could not find document.xml in the DOCX file.")
+                return
+                
+            # Read the XML content
+            with open(document_xml_path, 'r', encoding='utf-8') as f:
+                xml_content = f.read()
+                
+            # Try to pretty print it
+            try:
+                dom = xml.dom.minidom.parseString(xml_content)
+                pretty_xml = dom.toprettyxml(indent="  ")
+            except Exception as e:
+                pretty_xml = xml_content  # Fallback to raw content
+                messagebox.showwarning("Warning", f"Could not pretty-print XML: {str(e)}\nSaving raw XML content.")
+                
+            # Write to the selected file
+            with open(export_path, 'w', encoding='utf-8') as f:
+                f.write(pretty_xml)
+                
+            messagebox.showinfo("Success", f"Document XML exported to {os.path.basename(export_path)}")
+            
+            # Clean up temp dir if we created it just for this export
+            if temp_created and self.temp_dir:
+                try:
+                    shutil.rmtree(self.temp_dir)
+                    self.temp_dir = None
+                except:
+                    pass
+                    
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export XML: {str(e)}")
+    
     def show_help(self):
         help_text = """DOCX Editor Help
 
@@ -2258,6 +2324,7 @@ Developer Features:
 - Developer Mode: Enable XML editing of DOCX files
 - Edit XML Structure: View and edit the raw XML files in the DOCX
 - Specific XML Editors: Edit core.xml, document.xml, styles.xml directly
+- Export to XML: Export document content as standalone XML file
 
 Shortcuts:
 - Ctrl+N: New document
