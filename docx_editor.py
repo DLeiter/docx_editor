@@ -9,6 +9,8 @@ import zipfile
 import tempfile
 import shutil
 import xml.dom.minidom
+import json
+import xmltodict
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext, colorchooser, font
 from tkinter.constants import *
@@ -221,6 +223,7 @@ class DocxEditor:
         devmenu.add_command(label="View Styles XML", command=lambda: self.edit_specific_xml("word/styles.xml"))
         devmenu.add_separator()
         devmenu.add_command(label="Export Document to XML", command=self.export_to_xml)
+        devmenu.add_command(label="Export Document to JSON", command=self.export_to_json)
         menubar.add_cascade(label="Developer", menu=devmenu)
         
         self.root.config(menu=menubar)
@@ -2304,6 +2307,122 @@ class DocxEditor:
                     
         except Exception as e:
             messagebox.showerror("Error", f"Failed to export XML: {str(e)}")
+            
+    def export_to_json(self):
+        """Export the document's XML content converted to JSON"""
+        if not self.document or not self.current_file:
+            messagebox.showinfo("No Document", "Please open a document first.")
+            return
+            
+        # Ask user where to save the JSON file
+        default_filename = os.path.splitext(os.path.basename(self.current_file))[0] + ".json"
+        export_path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            initialfile=default_filename
+        )
+        
+        if not export_path:
+            return  # User cancelled
+            
+        try:
+            # Create a temp dir if not already created
+            temp_created = False
+            if not self.temp_dir:
+                self.temp_dir = tempfile.mkdtemp()
+                temp_created = True
+                
+                # Extract the docx file
+                with zipfile.ZipFile(self.current_file, 'r') as zip_ref:
+                    zip_ref.extractall(self.temp_dir)
+            
+            # Get the document.xml path
+            document_xml_path = os.path.join(self.temp_dir, "word", "document.xml")
+            
+            if not os.path.exists(document_xml_path):
+                messagebox.showerror("Error", "Could not find document.xml in the DOCX file.")
+                return
+                
+            # Read the XML content
+            with open(document_xml_path, 'r', encoding='utf-8') as f:
+                xml_content = f.read()
+            
+            try:
+                # Convert XML to JSON
+                xml_dict = xmltodict.parse(xml_content)
+                json_content = json.dumps(xml_dict, indent=2)
+                
+                # Write to the selected file
+                with open(export_path, 'w', encoding='utf-8') as f:
+                    f.write(json_content)
+                    
+                messagebox.showinfo("Success", f"Document JSON exported to {os.path.basename(export_path)}")
+                
+            except Exception as e:
+                # Try a simpler conversion if xmltodict fails
+                try:
+                    # Parse XML with minidom and build a simplified JSON structure
+                    dom = xml.dom.minidom.parseString(xml_content)
+                    simple_json = self.convert_xml_to_simplified_json(dom)
+                    json_content = json.dumps(simple_json, indent=2)
+                    
+                    # Write to the selected file
+                    with open(export_path, 'w', encoding='utf-8') as f:
+                        f.write(json_content)
+                        
+                    messagebox.showinfo("Success", f"Simplified document JSON exported to {os.path.basename(export_path)}")
+                    
+                except Exception as e2:
+                    messagebox.showerror("Error", f"Failed to convert to JSON: {str(e2)}")
+            
+            # Clean up temp dir if we created it just for this export
+            if temp_created and self.temp_dir:
+                try:
+                    shutil.rmtree(self.temp_dir)
+                    self.temp_dir = None
+                except:
+                    pass
+                    
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export JSON: {str(e)}")
+    
+    def convert_xml_to_simplified_json(self, dom_node):
+        """Convert DOM node to a simplified JSON structure"""
+        result = {}
+        
+        # Add attributes
+        if dom_node.attributes:
+            for i in range(dom_node.attributes.length):
+                attr = dom_node.attributes.item(i)
+                result[f"@{attr.name}"] = attr.value
+        
+        # Process child nodes
+        children = {}
+        for child in dom_node.childNodes:
+            if child.nodeType == xml.dom.Node.ELEMENT_NODE:
+                child_name = child.tagName
+                child_result = self.convert_xml_to_simplified_json(child)
+                
+                if child_name in children:
+                    # If this node name already exists, make it a list
+                    if not isinstance(children[child_name], list):
+                        children[child_name] = [children[child_name]]
+                    children[child_name].append(child_result)
+                else:
+                    children[child_name] = child_result
+            elif child.nodeType == xml.dom.Node.TEXT_NODE and child.nodeValue.strip():
+                # Only include non-empty text nodes
+                if not "#text" in children:
+                    children["#text"] = child.nodeValue.strip()
+                else:
+                    if not isinstance(children["#text"], list):
+                        children["#text"] = [children["#text"]]
+                    children["#text"].append(child.nodeValue.strip())
+        
+        # Merge children into result
+        result.update(children)
+        
+        return result
     
     def show_help(self):
         help_text = """DOCX Editor Help
@@ -2325,6 +2444,7 @@ Developer Features:
 - Edit XML Structure: View and edit the raw XML files in the DOCX
 - Specific XML Editors: Edit core.xml, document.xml, styles.xml directly
 - Export to XML: Export document content as standalone XML file
+- Export to JSON: Convert document XML to JSON format
 
 Shortcuts:
 - Ctrl+N: New document
